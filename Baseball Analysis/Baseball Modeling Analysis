@@ -1,0 +1,282 @@
+---
+title: "Predicting Career Batting Average based on various characteristics"
+author: Injoong Kim and Jared Elison
+output: pdf_document
+---
+
+```{=html}
+<style type="text/css">
+h1.title { 
+font-size: 40px;
+text-align: center;
+}
+h4.author { 
+font-size: 40px;
+text-align: center;
+}
+</style>
+```
+\newpage
+
+```{r setup, include=FALSE}
+# load all necessary packages here
+library(dplyr)
+library(tidyverse)
+library(ggfortify)
+library(gridExtra)
+library(car)
+library(corrplot)  
+library(patchwork)
+library(forcats)
+library(Lahman)
+library(ggplot2)
+library(bestglm)
+library(glmnet) 
+```
+
+# Abstract
+
+In this analysis, we used the Lahmans data set in R to look at shortstops born after 1980 who had more than 2000 at-bats to answer the questions of which personal information from height, weight, batting side, and birth country along with base on balls, and year born linearly related to batting average? For the variables that are linearly related we would like to know what are the confidence intervals for an average batting average for a player born in the U.S., a player born in Venezuela, and a player born in the Dominican Republic split further into a player that bats left-handed, a player that bats right-handed, and a player that bats switch that is of average physical characteristics. We discovered that the number of base on balls, bats, and birth country are significantly linearly related with career batting average. Also from the confidence intervals, we note that the confidence intervals of both-handed were 10 percent lower than the left and right-handed in all three countries.
+
+# 1 Problem and Motivation
+
+Shortstop is generally considered one of the most difficult positions to play in the MLB. As a result, finding a shortstop who can play the position and have a high batting average is difficult to achieve. It has been well documented that having a higher batting average as a team is related with more winning. Thus having an above-average or average batting average from a position that generally struggles to have a high batting average can improve the team batting average and team win percentage. This is important for fans of any team, but it can be important for teams themselves. Depending on the team it has been shown that an increase in winning percentage can be correlated with an increase in fan attendance. This is directly related to ticket sales and thus revenue.
+
+## 1.1 Data Description
+
+The source of our data is the Lahmans data set within R. Relevant variables within this dataset are H (hits), AB (at-bats), BB (base on balls), bats (Players batting hand), weight (pounds), height (inches), birthCountry, birthYear, and POS (position). Where each row of the data set is a player's season. These seasons will be combined so that in the analysis a player's career will be represented.
+
+## 1.2 Questions of Interest
+
+Does one of height, weight, batting hand, birth country, birth year, or base on balls have an effect on the average career batting average of an MLB shortstop?
+
+What are the average career batting averages and 95% Confidence Interval for MLB shortstops born in the United States, born in Venezuela, and born in the Dominican Republic who bats right-handed, bat left-handed, or bat both and are of average height, weight, base on balls, and birth year?
+
+## 1.3 Regression Methods
+
+Our analysis will begin by generating a scatter plot matrix of the continuous variables and box plots of the categorical variables with reference to the response of career batting average. We will then conduct forward and backward variable selection methods using AIC and BIC to determine what variables to include in our model. We will then fit our multi-variable model using lm and use a fitted values vs regression plot, histogram, Cook's Distance graph, and VIFs to determine if our model assumptions are met. We will then use ANOVA tests with the full model and reduced models that contain one variable removed to determine which variables are significant (question of interest 1). Then we will use the model to predict the average average batting average of average mlb shortstops from the U.S. (question of interest 2).
+
+# 2 Analyses, Results, and Interpretation
+
+## 2.1 Factors Influencing Batting Average
+
+```{r, warning= FALSE, include = FALSE}
+people_bat <- left_join(People,Batting,by='playerID')
+some_fielding <- subset(Fielding, select = c(playerID,POS,E))
+people_bat_field <- left_join(people_bat, some_fielding, by = 'playerID') 
+total <- anti_join(people_bat_field,Pitching,by='playerID') # removes pitchers from the data frame
+
+
+total <-total |>
+  group_by(playerID) |>
+  reframe(totalH = sum(H),
+         totalAB = sum(AB),
+         carbatavg = round(totalH/totalAB,3),
+         BB =mean(BB),
+         bats = bats,
+         weight = weight,
+         height = height,
+         birthCountry = birthCountry,
+         bY = birthYear,
+         POS = POS)  #creates data frame with variables we like. 
+
+total_short <- total |>
+  filter(POS=='SS',bY>1980)  %>%   #Sets to only shortstops who where born after 1980
+  mutate(birthCountry = as.factor(birthCountry)) |>
+  mutate(bats = fct_relevel(bats, "R")) |>               # sets R as baseline
+  mutate(birthCountry = fct_relevel(birthCountry, "USA")) |>  #sets USA as baseline 
+  distinct() |>
+  filter(totalAB > 2000) #550 is avg at bats * at least 5 seasons -> we get best bats_B for model
+
+batter <- subset(total_short, select = c(-playerID,-totalAB,-totalH,-POS)) #removes unneeded columns
+batter <- na.omit(batter) #removes NA's
+summary(batter)
+```
+
+```{r,include = FALSE}
+#EDA
+#scatterplot
+batter |>
+  subset( select = c(-birthCountry,-bats)) |>
+  pairs(pch = 19, lower.panel = NULL)
+#boxplot
+ggplot(data = batter) +
+  geom_boxplot(mapping = aes(x = bats, y = carbatavg)) +
+  theme(aspect.ratio = 1)
+ggplot(data = batter) +
+  geom_boxplot(mapping = aes(x = birthCountry, y = carbatavg)) +
+  theme(aspect.ratio = 1)
+```
+
+```{r,include=FALSE}
+#Forward Selection
+base_mod <- lm(carbatavg ~ 1, data = batter) # Intercept only model (null model, or base model)
+full_mod <- lm(carbatavg ~ ., data = batter) # All predictors in model (besides response)
+
+#AIC
+forw_AIC <- step(base_mod, # starting model for algorithm
+     direction = "forward",
+     scope=list(lower= base_mod, upper= full_mod))
+
+#Best models in AIC
+summary(forw_AIC)
+
+#BIC
+forw_BIC <- step(base_mod, # starting model for algorithm
+     direction = "forward",
+     k = log(nrow(batter)),
+     scope=list(lower= base_mod, upper= full_mod))
+
+#Best models in BIC
+summary(forw_BIC)
+
+
+#Backward Selection
+#AIC
+back_AIC <- step(full_mod, # starting model for algorithm
+     direction = "backward",
+     scope=list(lower= base_mod, upper= full_mod))
+
+#Best models in AIC
+summary(back_AIC)
+
+#BIC
+back_BIC <- step(full_mod, # starting model for algorithm
+     direction = "backward",
+     k = log(nrow(batter)),
+     scope=list(lower= base_mod, upper= full_mod))
+
+#Best models in BIC
+summary(back_BIC)
+
+
+batter_final <- batter |> dplyr::select(c(-bY,-BB))
+#batter_final
+
+batter_lm_final <- lm(carbatavg ~ birthCountry + BB + weight + bats+ bY, data = batter)
+summary(batter_lm_final)
+```
+
+```{r}
+batter_lm_final <- lm(carbatavg ~ birthCountry + BB + weight + bats+ bY, data = batter)
+```
+
+```{r, include = TRUE, warning= FALSE}
+#Assumptions and Diagnostics  #linearity & Constant variance
+lin<- autoplot(batter_lm_final, which = 1, ncol = 1, nrow = 1) + theme(aspect.ratio = 1, width = 2, height =2)           #Normality
+batter$residuals <- batter_lm_final$residuals
+batter$fits <- batter_lm_final$fitted.values
+norm <- ggplot(data = batter) + geom_histogram(aes(x = residuals, y = after_stat(density)), binwidth = .01) +
+  stat_function(fun = dnorm, color = "red", linewidth = 2,
+                args = list(mean = mean(batter$residuals), sd = sd(batter$residuals)))
+#Influential points
+infl<- autoplot(batter_lm_final, which = 4, ncol = 1, nrow = 1)  +
+ theme(aspect.ratio = 1)
+autoplot(batter_lm_final)
+#multicolinearity
+fat_vifs <- vif(batter_lm_final)
+fat_vifs
+```
+
+```{r}
+#anovas
+batter_lm_red <- lm(carbatavg ~ bY + weight + bats+birthCountry, data = batter)
+anova(batter_lm_red, batter_lm_final) # BB matters
+
+batter_lm_redu <- lm(carbatavg ~ BB+weight + bats +birthCountry, data = batter)
+anova(batter_lm_redu, batter_lm_final)   # BY doesn't matter
+
+batter_lm_reduc <- lm(carbatavg ~bY +BB+ bats + birthCountry, data = batter)
+anova(batter_lm_reduc, batter_lm_final)    #weight  doesn't matters
+
+batter_lm_reduce <- lm(carbatavg ~ bY+BB+weight +birthCountry, data = batter)
+anova(batter_lm_reduce, batter_lm_final)    #bats does matter
+
+batter_lm_reduced <- lm(carbatavg ~bY+BB+weight+bats, data = batter)
+anova(batter_lm_reduced, batter_lm_final)    #birthCountry does matter
+```
+
+In this analysis utilizing the Lahmans dataset in R, our primary focus was to find the complicated relationships between various personal attributes and performance metrics of MLB shortstops born after 1980 and recorded at least 2000 at basts during their careers. We specifically looked into the impact of factors such as height, weight, batting hand, birth country, birth year, and base on balls on the average career batting average of these players.
+
+Our findings reveal an interplay between certain variables and career batting averages. Through a systematic approach involving scatter plots, box plots, and advanced regression techniques, we identified the key determinants that significantly influence a shortstop's performance at the plate. The inclusion of forward and backward variable selection methods aided in refining our model.
+
+Addressing the first question of interest, we discerned the factors that contribute significantly to the variation in average career batting averages among MLB shortstops. First, we performed our analysis with the factors which are height, weight, batting hand, birth country, birth year, and the number of base on balls. We used the selection method to find the best model. We chose to use the backward selection method because the backward selection is often more computationally efficient, particularly when dealing with many predictors. And the backward selection also can help reduce the multicollinearity. For metrics, we used BIC since we wanted a simpler model. As a result, we decided to drop the height variable from our final model.
+
+After that, we checked the assumption for our model. We checked linearity, equal variance, normality, influential points, and multicollinearity using diagnostics tools and we confirmed that all of the assumptions were met.
+
+The application of ANOVA tests helped the identification of variables that play a pivotal role in shaping a player's performance. We found that the number of base on balls, bats, and birth country were significant.
+
+## 2.2 95% Confidence Interval of Average Career Batting Average
+
+```{r}
+#USA
+PI_95_USA_R <- predict(batter_lm_final, 
+                    newdata = data.frame(bats = "R", weight = 198.9, BB= 20.22, bY=1989,
+                                         birthCountry = "USA"), interval = 'prediction',
+                    level = .95)
+PI_95_USA_R
+PI_95_USA_L <- predict(batter_lm_final, newdata = data.frame(bats = "L", weight = 198.9, BB= 20.22,
+                                         bY=1989, birthCountry = "USA"), interval = 'prediction',
+                    level = .95)
+PI_95_USA_L
+PI_95_USA_B <- predict(batter_lm_final, newdata = data.frame(bats = "B", weight = 198.9,BB= 20.22,
+                                         bY=1989, birthCountry = "USA"), interval = 'prediction',
+                    level = .95)
+PI_95_USA_B 
+#D.R.
+PI_95_DR_R <- predict(batter_lm_final,newdata = data.frame(bats = "R",weight = 198.9, BB= 20.22,
+                                         bY=1989,birthCountry = "D.R."), interval = 'prediction',
+                    level = .95)
+PI_95_DR_R
+PI_95_DR_L <- predict(batter_lm_final, newdata = data.frame(bats = "L", weight = 198.9,BB= 20.22,
+                                         bY=1989,birthCountry = "D.R."), interval = 'prediction',
+                    level = .95)
+PI_95_DR_L
+PI_95_DR_B <- predict(batter_lm_final, newdata = data.frame(bats = "B",weight = 198.9, BB= 20.22,
+                                         bY=1989,birthCountry = "D.R."), interval = 'prediction',
+                    level = .95)
+PI_95_DR_B
+#Venezuela
+PI_95_VZ_R <- predict(batter_lm_final, newdata = data.frame(bats = "R",weight = 198.9, BB= 20.22,
+                                         bY=1989,birthCountry = "Venezuela"), interval = 'prediction',
+                    level = .95)
+PI_95_VZ_R
+PI_95_VZ_L <- predict(batter_lm_final, newdata = data.frame(bats = "L", weight = 198.9, BB= 20.22,
+                                         bY=1989,birthCountry = "Venezuela"), interval = 'prediction',
+                    level = .95)
+PI_95_VZ_L
+PI_95_VZ_B <- predict(batter_lm_final, newdata = data.frame(bats = "B",weight = 198.9,BB= 20.22,
+                                         bY=1989, birthCountry = "Venezuela"),interval = 'prediction',
+                    level = .95)
+PI_95_VZ_B
+```
+
+Moving on to the second question, we created and analyzed each 95% confidence interval of left-handed, right-handed, and both-handed hitters in the United States, the Dominican Republic, and Venezuela which are the top 3 largest numbers in our sample with average weights, the number of bases on balls, and birth year. From there, we found an interesting fact about the batting average. In all three countries, the confidence intervals between right-handed and left-handed were shown to be almost similar, although the confidence intervals between right-handed and left-handed were really slightly higher. The confidence intervals of both-handed were 10 percent lower than the left and right-handed in all three countries.
+
+Based on the confidence interval, we are 95% confident that the batting average of USA right-handed hitters with, a weight of 198.9 pounds, mean of the number of bases on balls, and birth in 1989, is estimated to be between 0.198 and 0.290.
+
+Also, we are 95% confident that the batting average of USA left-handed hitters with, a weight of 198.9 pounds, mean of the number of bases on balls, and birth in 1989, is estimated to be between 0.197 and 0.290.
+
+And we are 95% confident that the batting average of USA both-handed hitters with, a weight of 198.9 pounds, mean of the number of bases on balls, and birth in 1989, is estimated to be between 0.187 and 0.280.
+
+In the same way, as we interpreted the confidence interval of the United States, we can interpret the confidence interval of the batting average of the Dominican Republic and Venezuelan hitters.
+
+The result of our analysis provides a valuable understanding of the expected performance metrics for this subgroup, aiding teams in strategic decision-making and talent assessment.
+
+# 3 Conclusions
+
+In conclusion, our analysis of MLB shortstops born after 1980 reveals key factors influencing career batting averages. Utilizing the Lahmans dataset in R, we employed advanced regression techniques, including backward variable selection with BIC, to identify significant variables such as the number of bases on balls, bats, and birth country. Our findings contribute valuable insights for teams in talent assessment and strategic decision-making.
+
+Additionally, we explored 95% confidence intervals for left-handed, right-handed, and both-handed hitters from the top three countries in our sample---the USA, the Dominican Republic, and Venezuela. Subtle differences in confidence intervals suggest nuanced insights into player performance, aiding teams in understanding batting average expectations based on player characteristics.
+
+But at the same time, we acknowledged the limitations inherent in such statistical explorations. For instance, the R squared of our model is about 0.4. We tried to make our R squared better. We could increase our R squared but we thought 0.4 of R squared was still good for our research. When we tried to increase the R squared, our sample became too small. And we also think that there are other variables that can help predict the batting average. In further research, we will consider other variables.
+
+Baseball, as a dynamic sport, involves multifaceted interactions between numerous variables, and our model captures a snapshot of these complexities. Nevertheless, the insights gained can help for informed decision-making in team management and player development, emphasizing the importance of data-driven approaches in the ever-evolving landscape of professional sports.
+
+# 4 Contributions
+
+Jared had primary responsibility for writing the abstract and sections 1 to 1.3. He was also the primary contributor to the code sections entitled EDA, Assumptions and Diagnostics, and Anovas.
+
+Injoong had principal responsibility for writing sections 2 to 3. Along with the code chunk sections started with forward selection and USA.
+
+Code preliminary to the creation of the batter data frame did not have a primary contributor.
